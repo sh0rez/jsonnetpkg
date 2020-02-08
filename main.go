@@ -101,22 +101,40 @@ func resolveDependencies(owner, repo, subdir string) ([]Package, error) {
 	}
 
 	pkgs := make([]Package, 0, len(jf.Dependencies))
-	for _, d := range jf.Dependencies {
-		ds, err := resolveDependencies(d.Source.GitSource.User, d.Source.GitSource.Repo, d.Source.GitSource.Subdir)
-		if err != nil {
-			return nil, err
-		}
 
-		pkgs = append(pkgs, Package{
-			Host:         d.Source.GitSource.Host,
-			User:         d.Source.GitSource.User,
-			Repo:         d.Source.GitSource.Repo,
-			Subdir:       d.Source.GitSource.Subdir,
-			Version:      d.Version,
-			Dependencies: ds,
-		})
+	results := make(chan []Package)
+	errs := make(chan error)
+	for _, d := range jf.Dependencies {
+		go parallelResolve(d.Source.GitSource.User, d.Source.GitSource.Repo, d.Source.GitSource.Subdir, results, errs)
 	}
+
+	for _, d := range jf.Dependencies {
+		select {
+		case err := <-errs:
+			return nil, err
+		case transient := <-results:
+			pkgs = append(pkgs, Package{
+				Host:         d.Source.GitSource.Host,
+				User:         d.Source.GitSource.User,
+				Repo:         d.Source.GitSource.Repo,
+				Subdir:       d.Source.GitSource.Subdir,
+				Version:      d.Version,
+				Dependencies: transient,
+			})
+		}
+	}
+
 	return pkgs, nil
+}
+
+func parallelResolve(owner, repo, subdir string, result chan []Package, e chan error) {
+	pkgs, err := resolveDependencies(owner, repo, subdir)
+	if err != nil {
+		e <- err
+		return
+	}
+	result <- pkgs
+	return
 }
 
 func lock(pkgs []Package, locks map[string]string) error {
@@ -124,26 +142,43 @@ func lock(pkgs []Package, locks map[string]string) error {
 		return nil
 	}
 
+	results := make(chan lockResult)
+	errs := make(chan error)
+
 	for _, p := range pkgs {
 		if _, ok := locks[p.String()]; ok {
 			continue
 		}
 
-		ver, err := resolveVersion(p)
-		if err != nil {
+		go resolveVersion(p, results, errs)
+	}
+
+	for range pkgs {
+		select {
+		case err := <-errs:
 			return err
+		case r := <-results:
+			locks[r.key] = r.value
 		}
-		locks[p.String()] = ver
 	}
 	return nil
 }
 
-func resolveVersion(p Package) (string, error) {
+type lockResult struct {
+	key, value string
+}
+
+func resolveVersion(p Package, result chan lockResult, e chan error) {
 	c := github.NewClient(nil)
 	branch, _, err := c.Repositories.GetBranch(context.Background(), p.User, p.Repo, p.Version)
 	if err != nil {
-		return "", err
+		e <- err
+		return
 	}
 
-	return branch.Commit.GetSHA(), nil
+	result <- lockResult{
+		key:   p.Name(),
+		value: branch.Commit.GetSHA(),
+	}
+	return
 }
