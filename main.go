@@ -2,22 +2,34 @@ package main
 
 import (
 	"fmt"
+	"io/ioutil"
 	"log"
 	"os"
+	"path/filepath"
+	"strings"
 
-	"gopkg.in/yaml.v3"
+	"github.com/otiai10/copy"
+	yaml "gopkg.in/yaml.v3"
 )
 
 type Resolver interface {
+	// Deps returns the Pkgfile of the package, by querying it from the remote
 	Deps(p Package) (*Pkgfile, error)
+
+	// Commit returns the latest commit for the package/version match
 	Commit(p Package) (string, error)
 }
 
 type Installer interface {
-	Install(p Package, to string) error
+	// Install should install the root of a package to the given path.
+	// Installers must not take care of subdirs, etc.
+	// They must however extract archives if required.
+	Install(p Package, tmp, to string) error
 }
 
 func main() {
+	log.SetFlags(0)
+
 	file := Pkgfile{
 		Deps: map[string]Package{
 			"": {
@@ -54,6 +66,10 @@ func main() {
 		log.Fatalln(err)
 	}
 	fmt.Print("jsonnet.lock:\n", string(data))
+
+	if err := ensure(locks, "vendor"); err != nil {
+		log.Fatalln(err)
+	}
 }
 
 // resolve takes a Package and adds it with resolved Dependencies to
@@ -81,5 +97,46 @@ func resolve(p Package, r Resolver, locks Lockfile) error {
 	p.Deps = transient
 
 	locks[p.String()] = p
+	return nil
+}
+
+func ensure(locks Lockfile, dir string) error {
+	if err := os.RemoveAll(dir); err != nil {
+		return err
+	}
+	if err := os.MkdirAll(dir, os.ModePerm); err != nil {
+		return err
+	}
+
+	installer := GitHubInstaller{}
+
+	for _, p := range locks.Packages() {
+		// create tmp dir for this install
+		slug := strings.Replace(p.Name(), "/", "-", -1)
+		tmp, err := ioutil.TempDir("", "jpkg-"+slug)
+		if err != nil {
+			return err
+		}
+		defer os.RemoveAll(tmp)
+
+		// install to tmp location
+		installLoc := filepath.Join(tmp, "pkg")
+		installTmp := filepath.Join(tmp, "tmp")
+		if err := installer.Install(p, installTmp, installLoc); err != nil {
+			return err
+		}
+
+		// prepare final location and move there
+		to := filepath.Join(dir, p.Locked())
+		if err := os.MkdirAll(filepath.Dir(to), os.ModePerm); err != nil {
+			return err
+		}
+
+		pkgDir := filepath.Join(installLoc, p.Subdir)
+		if err := copy.Copy(pkgDir, to); err != nil {
+			return err
+		}
+	}
+
 	return nil
 }

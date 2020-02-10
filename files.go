@@ -58,6 +58,21 @@ const (
 	LockPrefixSum    = "sum:"
 )
 
+// Packages returns the flat list of packages
+func (l Lockfile) Packages() map[string]Package {
+	pkgs := make(map[string]Package)
+	for _, p := range l {
+		pkgs[p.Locked()] = p
+
+		deps := Lockfile(p.Deps)
+		for _, d := range deps.Packages() {
+			pkgs[d.Locked()] = d
+		}
+	}
+
+	return pkgs
+}
+
 func (l Lockfile) MarshalYAML() (interface{}, error) {
 	locks := []interface{}{}
 

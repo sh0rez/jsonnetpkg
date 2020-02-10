@@ -6,10 +6,23 @@ import (
 	"fmt"
 	"io/ioutil"
 	"net/http"
+	"path/filepath"
+	"strings"
 
+	"github.com/cavaliercoder/grab"
 	"github.com/google/go-github/v29/github"
 	"github.com/jsonnet-bundler/jsonnet-bundler/pkg/jsonnetfile"
+	"github.com/mholt/archiver"
+	"github.com/otiai10/copy"
 	"golang.org/x/oauth2"
+)
+
+const (
+	// user, repo, commit-sha
+	uriZipball = "https://codeload.github.com/%s/%s/tar.gz/%s"
+
+	// user, repo, commit-sha, subdir
+	uriRawfile = "https://raw.github.com/%s/%s/%s/%s/jsonnetfile.json"
 )
 
 type GitHubResolver struct {
@@ -17,7 +30,7 @@ type GitHubResolver struct {
 }
 
 func (gh GitHubResolver) Deps(p Package) (*Pkgfile, error) {
-	req, err := http.Get(fmt.Sprintf("https://raw.github.com/%s/%s/%s/%s/jsonnetfile.json", p.User, p.Repo, p.Commit, p.Subdir))
+	req, err := http.Get(fmt.Sprintf(uriRawfile, p.User, p.Repo, p.Commit, p.Subdir))
 	if err != nil {
 		return nil, err
 	}
@@ -72,4 +85,33 @@ func (gh GitHubResolver) Commit(p Package) (string, error) {
 	}
 
 	return branch.Commit.GetSHA(), nil
+}
+
+type GitHubInstaller struct{}
+
+func (gh GitHubInstaller) Install(p Package, tmp, to string) error {
+	fn := filepath.Join(tmp, "pkg.tar.gz")
+
+	// download the archive
+	uri := fmt.Sprintf(uriZipball, p.User, p.Repo, p.Commit)
+	fmt.Print("GET ", uri)
+	res, err := grab.Get(fn, uri)
+	if err != nil {
+		return err
+	}
+	fmt.Println("", res.HTTPResponse.StatusCode)
+
+	target := res.HTTPResponse.Header.Get("Content-Disposition")
+	target = strings.TrimPrefix(target, "attachment; filename=")
+	target = strings.TrimSuffix(target, ".tar.gz")
+
+	// untar it
+	extracted := filepath.Join(tmp, "extracted")
+	if err := archiver.Extract(fn, target, extracted); err != nil {
+		return err
+	}
+
+	// move it in place
+	loc := filepath.Join(extracted, target)
+	return copy.Copy(loc, to)
 }
